@@ -1,4 +1,4 @@
-#README
+# README
 
 This folder contains the source code for the analysis of microbiome 16S amplicon data for the data analysis module of the EnSE314 Public Health Microbiology course.
 
