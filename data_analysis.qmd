@@ -1,0 +1,257 @@
+---
+title: "EnSE314: Data analysis"
+author: "Shaman Narayanasamy"
+format: pdf
+---
+
+## Introduction
+This markdown covers the data analysis module for the EnSE314 -- Public Health Microbiology course.
+```{r installation_of_tools}
+## Install R Bioconductor
+if (!require("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+BiocManager::install(version = "3.16")
+
+## Install DADA2, phyloseq and Biostrings via Bioconductor
+BiocManager::install(c("dada2", "phyloseq", "Biostrings"))
+
+## Install tidyverse 
+install.packages("tidyverse")
+```
+
+```{r load_packages}
+## Load the various packages that we will need for our data processing and analyses
+
+### DADA2 will perform the bulk of the data processing, converting raw sequence data into taxonomic information
+library(dada2); packageVersion("dada2")
+
+### A package for standardized management of processed amplicon sequencing output (e.g. from DADA2) 
+library(phyloseq); packageVersion("phyloseq")
+
+### A package to manage sequences
+library(Biostrings); packageVersion("Biostrings")
+
+### A "universe" of packages for tidy data management and data visualizations using ggplot2
+library(tidyverse)
+theme_set(theme_bw())
+```
+
+```{r setup}
+## Create a working directory (if it does not exist)
+work_directory <- "/Users/shaman.narayanasamy/Work/Data/EnSE314_data/output" # CHANGE according to your machine
+
+knitr::opts_knit$set(work_directory)
+```
+
+
+```{r define_paths}
+## Define directory containing raw data sets
+raw_data_path <- "/Users/shaman.narayanasamy/Work/Data/EnSE314_data/MiSeq_SOP" # CHANGE according to your machine
+
+## Path to 16S SILVA training database
+silva_db_path <- "/Users/shaman.narayanasamy/Work/Data/EnSE314_data/silva_nr99_v138.1_train_set.fa.gz" ## CHANGE according to your machine
+
+silva_species_db_path <- "/Users/shaman.narayanasamy/Work/Data/EnSE314_data/silva_species_assignment_v138.1.fa.gz" ## CHANGE according to your machine
+
+## Create if it does not exist yet
+dir.create(work_directory, recursive = T)
+
+## Set it within the R environment
+setwd(work_directory)
+
+## Prepare table with sample data input 
+data_table <-  
+  bind_cols( 
+    R1 = list.files(raw_data_path, patter = "_R1_001.fastq", full.names = T), 
+    R2 = list.files(raw_data_path, patter = "_R2_001.fastq", full.names = T)  
+    ) %>% 
+    mutate(sample_id = basename(R1)) %>% 
+    separate(sample_id, into = c("sample_id"), sep = "_") %>% 
+    select(sample_id, R1, R2)
+```
+
+```{r}
+## Visualise the quality of the first two forward sample reads
+data_table %>% pull(R1) %>% .[1:2] %>% plotQualityProfile()
+```
+
+```{r}
+## Visualise the quality of the first two forward sample reads
+data_table %>% pull(R2) %>% .[1:2] %>% plotQualityProfile()
+```
+
+
+```{r}
+## Add names and paths to filtered files
+dir.create(file.path(work_directory, "filtered"), recursive = T)
+
+data_table <- 
+  bind_cols(  
+    data_table,
+    R1_filtered = file.path(work_directory, 
+                            "filtered", paste0(data_table$sample_id, "_R1_filt.fastq.gz")),
+    R2_filtered = file.path(work_directory, 
+                            "filtered", paste0(data_table$sample_id, "_R2_filt.fastq.gz")) 
+    )
+```
+
+```{r}
+out <- filterAndTrim(fwd = data_table$R1, 
+              filt = data_table$R1_filtered, 
+              rev = data_table$R2, 
+              filt.rev = data_table$R2_filtered,
+              truncQ = 2, 
+              truncLen = c(240, 160), 
+              maxN = 0, 
+              maxEE = c(2,2), 
+              rm.phix = TRUE, 
+              compress = TRUE,
+              multithread = TRUE) # Set this to FALSE if on Windows
+
+head(out)
+```
+## Learn error rates
+```{r learn_errors_r1}
+errR1 <- learnErrors(data_table$R1_filtered)
+```
+
+
+```{r learn_errors_r2}
+errR2 <- learnErrors(data_table$R2_filtered)
+```
+
+```{r}
+plotErrors(errR1, nominalQ = TRUE)
+```
+```{r dada_R1}
+dadaR1 <- dada(data_table$R1_filtered, err=errR1, multithread=TRUE)
+```
+
+```{r dada_R2}
+dadaR2 <- dada(data_table$R2_filtered, err=errR2, multithread=TRUE)
+```
+```{r inspect_dada}
+## Check object class
+class(dadaR1)
+length(dadaR1)
+
+## Check object structure, but just be aware that it will throw out a bunch of cryptic output
+#str(dadaR1) 
+
+dadaR1[[1]]
+```
+## Merge paired reads
+```{r merge}
+mergers <- mergePairs(dadaF = dadaR1, derepF = data_table$R1_filtered, 
+                      dadaR = dadaR2, derepR = data_table$R2_filtered, 
+                      verbose=TRUE)
+```
+
+## Construct sequence table
+```{r seq_table}
+seq_table <- makeSequenceTable(mergers)
+```
+```{r inspect_seq_table}
+## check the clas
+class(seq_table)
+
+## Inspect distribution of sequence lengths
+getSequences(seq_table) %>%  # List full sequences
+  nchar() %>%  # Count characters of aforementioned sequences
+  table() # Summarise said character count
+```
+## Remove chimeras
+```{r}
+seq_table_nochim <- removeBimeraDenovo(seq_table, 
+                                       method="consensus", 
+                                       multithread=TRUE, verbose=TRUE)
+# Check table dimensions
+dim(seq_table_nochim)
+sum(seq_table_nochim)/sum(seq_table)
+```
+## Track reads through the DADA2 pipeline
+```{r}
+# Create a custom function to apply to each DADA object
+getN <- function(x) sum(getUniques(x))
+
+track <- bind_cols(
+  rownames(out) %>% as_tibble() %>% separate(value, into = c("sample_id"), sep = "_"),
+  out %>% as_tibble() %>% select(input = reads.in, filtered = reads.out),
+  denoisedR1 = map_dbl(dadaR1, getN),
+  denoisedR2 = map_dbl(dadaR2, getN),
+  merged = map_dbl(mergers, getN),
+  no_chimera = rowSums(seq_table_nochim)
+) 
+```
+```{r assign_taxonomy}
+taxa <- assignTaxonomy(seq_table_nochim, silva_db_path, multithread = TRUE)
+taxa <- addSpecies(taxa, silva_species_db_path)
+
+## Let's look into some headers
+taxa_print <- taxa
+rownames(taxa_print) <- NULL
+head(taxa_print)
+```
+## Data analysis
+
+```{r}
+## Prepare sample information
+sample_info <-  
+  data_table %>% 
+  separate(sample_id, into = c("Subject", "Day"), sep = "D", remove = FALSE) %>% 
+  mutate(Day = as.integer(Day), 
+         Gender = substr(Subject, 1, 1),
+         Subject = substr(Subject, 2,2),
+         sample_id = basename(R1_filtered)) %>% 
+  select(sample_id, Subject, Gender, Day) %>% 
+  mutate(When = case_when(
+    Day >= 100 ~ "Late",
+    TRUE ~ "Early"
+  )) %>% 
+  column_to_rownames("sample_id") 
+```
+
+```{r}
+## Prepare phyloseq object
+ps <- phyloseq(otu_table(seq_table_nochim, taxa_are_rows=FALSE), 
+               sample_data(sample_info %>% data.frame()), 
+               tax_table(taxa))
+
+ps <- prune_samples(sample_names(ps) != "Mock_R1_filt.fastq.gz", ps) # Remove mock sample
+
+```
+```{r}
+dna <- Biostrings::DNAStringSet(taxa_names(ps))
+names(dna) <- taxa_names(ps)
+ps <- merge_phyloseq(ps, dna)
+taxa_names(ps) <- paste0("ASV", seq(ntaxa(ps)))
+ps
+```
+```{r}
+plot_richness(ps, x="Day", measures=c("Shannon", "Simpson"), color="When")
+```
+
+```{r}
+pr.prop <- transform_sample_counts(ps, function(otu) otu/sum(otu))
+ord.nmds.bray <- ordinate(pr.prop, method="PCoA", distance="bray")
+```
+```{r}
+plot_ordination(pr.prop, ord.nmds.bray, color="When", title="Bray NMDS")
+```
+```{r}
+## Get top 20 taxa
+top20 <- taxa_sums(ps) %>% 
+  sort(decreasing = TRUE) %>% 
+  names() %>% 
+  .[1:20]
+
+ps.top20 <- transform_sample_counts(ps, function(OTU) OTU/sum(OTU))
+
+ps.top20 <- prune_taxa(top20, ps.top20)
+
+plot_bar(ps.top20, x="Day", fill="Family") + 
+  facet_wrap(~When, scales="free_x")
+```
+
+
+
