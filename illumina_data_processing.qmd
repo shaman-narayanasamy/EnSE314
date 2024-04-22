@@ -1,5 +1,5 @@
 ---
-title: "EnSE314: Data analysis"
+title: "EnSE314: Illumina 16S amplicon sequencing data processing"
 author: "Shaman Narayanasamy"
 format: html
 params:
