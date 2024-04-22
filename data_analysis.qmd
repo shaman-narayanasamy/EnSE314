@@ -1,5 +1,5 @@
 ---
-title: "Data analysis"
+title: "EnSE314: Data analysis"
 format: html
 params:
   metadata_file: "PRJEB48354_metadata.xlsx"
