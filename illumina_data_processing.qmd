@@ -1,0 +1,281 @@
+---
+title: "EnSE314: Data analysis"
+author: "Shaman Narayanasamy"
+format: html
+params:
+  ## Sample metadata
+  metadata_file: "PRJEB48354_metadata.xlsx"
+  ## 16S SILVA training database
+  silva_db: "silva_nr99_v138.1_train_set.fa.gz" 
+  silva_species_db: "silva_species_assignment_v138.1.fa.gz" 
+execute:
+  warning: false
+  message: false
+---
+
+## Installation of packages
+```{r installation_of_tools, eval = F}
+## Install R Bioconductor
+if (!require("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+BiocManager::install(version = "3.16")
+
+## Install DADA2, phyloseq and Biostrings via Bioconductor
+BiocManager::install(c("dada2", 
+                       "phyloseq", 
+                       "Biostrings", 
+                       "biomformat", 
+                       "DECIPHER",
+                       "DESeq2"))
+
+## Install tidyverse 
+install.packages("tidyverse")
+install.packages("readxl")
+install.packages("vegan")
+install.packages("ape")
+```
+
+## Load packages
+```{r load_packages}
+## Load the various packages that we will need for our data processing and analyses
+### Amplicon sequencing data processing
+library(dada2)
+
+### Standardized management of processed amplicon sequencing output (e.g. from DADA2) 
+library(phyloseq)
+
+### Sequence management
+library(Biostrings)
+
+## Alignment and construction of phylogenetic trees
+library(DECIPHER)
+library(ape)
+
+### A "universe" of packages for tidy data management and data visualizations using ggplot2
+library(tidyverse)
+library(readxl)
+theme_set(theme_bw())
+```
+## Setup
+```{r setup}
+## CHANGE this to the path in your computer where you saved the data
+root_dir <- "/Users/shaman.narayanasamy/Work/Data/EnSE314-PublicHealthMicrobio/EnSE314_data/"
+
+## Define input directory where you will read all your data from
+input_dir <- paste(root_dir, "input", sep = "/")
+
+## Define raw data path
+raw_data_path <- paste(input_dir, "PRJEB48354", sep = "/")
+
+## Define the output directory where you will generate all your output
+output_dir <- paste(root_dir, "output", sep = "/") 
+
+## Define metadata file path
+metadata_path <- paste(input_dir, params$metadata_file, sep = "/")
+
+## Create if it does not exist yet
+dir.create(output_dir, recursive = T)
+
+## Define the paths for the reference databases
+silva_db_path <- paste(input_dir, params$silva_db, sep = "/")
+silva_species_db_path <- paste(input_dir, params$silva_species_db, sep = "/")
+```
+
+```{r prepare_metadata}
+## Prepare table with individual input files and data table
+data_table <-  
+  read_xlsx(metadata_path, sheet = "Metadata") %>% 
+  mutate(common_name = str_replace(common_name, "&", "_")) %>% 
+  separate(common_name, into = c("tmp1", "tmp2", "day", "tmp3", "type", "reactor"), sep = "_", remove = FALSE, fill = "right")  %>% 
+  select(-c(tmp1, tmp2, tmp3)) %>% 
+  mutate(day = str_remove(day, "day")) %>% 
+  mutate(day = as.numeric(day)) %>% 
+  mutate(condition = case_when(
+   type == "feedWW" ~ "control",
+   TRUE ~ "treatment"
+  )) %>% 
+  select(sample_id = Run, condition, reactor, day)  %>% 
+  full_join(., 
+  bind_cols( 
+    R1 = list.files(raw_data_path, pattern = "_1.fastq.gz", full.names = T), 
+    R2 = list.files(raw_data_path, pattern = "_2.fastq.gz", full.names = T)  
+    ) %>% 
+    mutate(sample_id = basename(R1)) %>% 
+    separate(sample_id, into = c("sample_id"), sep = "_") %>% 
+    select(sample_id, R1, R2),
+    by = "sample_id")
+
+data_table
+```
+## Trimming and filtering
+### Assess raw data quality
+```{r}
+## Visualise the quality of the first two forward sample reads
+data_table %>% pull(R1) %>% .[1:2] %>% plotQualityProfile()
+```
+
+```{r}
+## Visualise the quality of the first two forward sample reads
+data_table %>% pull(R2) %>% .[1:2] %>% plotQualityProfile()
+```
+
+### Execute trimming and filtering
+```{r}
+## Create a directory to store the output files
+dir.create(file.path(output_dir, "filtered"), recursive = T)
+
+## Define names and paths of filtered files that will be generated
+data_table <- 
+  bind_cols(  
+    data_table,
+    R1_filtered = file.path(output_dir, 
+                            "filtered", paste0(data_table$sample_id, "_R1_filt.fastq.gz")),
+    R2_filtered = file.path(output_dir, 
+                            "filtered", paste0(data_table$sample_id, "_R2_filt.fastq.gz")) 
+    )
+```
+
+```{r}
+out <- filterAndTrim(fwd = data_table$R1, 
+              filt = data_table$R1_filtered, 
+              rev = data_table$R2, 
+              filt.rev = data_table$R2_filtered,
+              truncQ = 2, # Minimum quality to trim
+              truncLen = c(280, 200), # Minimum length of forward and reverse reads
+              trimLeft = 25, # Remove primer sequences
+              maxN = 0, # Do not allow any "N"/unknown bases (very low quality) anywhere
+              minLen = 50, # Remove reads below 20 bases
+              maxEE = c(2,2),  
+              rm.phix = TRUE, 
+              compress = TRUE,
+              multithread = TRUE) # Set this to FALSE if on Windows
+
+head(out)
+```
+### Assess filtered data quality
+```{r}
+## Visualise the quality of the first two reverse sample reads
+c(data_table %>% pull(R1) %>% .[1],  # Select first raw read
+  data_table %>% pull(R1_filtered) %>% .[1]) %>%  # Select equivaluent in the filtered reads
+  plotQualityProfile()
+```
+
+## Estimate error rates
+```{r learn_errors_r1}
+errR1 <- learnErrors(data_table$R1_filtered, multithread = TRUE, randomize = TRUE, nbases = 1e6)
+errR2 <- learnErrors(data_table$R2_filtered, multithread = TRUE, randomize = TRUE, nbases = 1e6)
+```
+
+```{r display_err_mat}
+errR1$err_out[c(1:5, 16), c(1:5, 36:41)]
+```
+```{r plot_error_mat}
+plotErrors(errR1, nominalQ = TRUE)
+```
+## Denoise and dereplicate sequences
+This is the core DADA2 algorithm
+```{r dada}
+dadaR1 <- dada(data_table$R1_filtered, err=errR1, multithread=TRUE)
+dadaR2 <- dada(data_table$R2_filtered, err=errR2, multithread=TRUE)
+```
+
+```{r inspect_dada}
+## Check object structure, but just be aware that it will throw out a bunch of cryptic output
+dadaR1[[1]]
+```
+## Merge denoised paired reads
+```{r merge}
+mergers <- mergePairs(dadaF = dadaR1, derepF = data_table$R1_filtered, 
+                      dadaR = dadaR2, derepR = data_table$R2_filtered, 
+                      verbose=TRUE)
+```
+
+## Construct OTU/ASV table
+```{r seq_table}
+seq_table <- makeSequenceTable(mergers)
+```
+```{r inspect_seq_table}
+## Inspect distribution of sequence lengths
+getSequences(seq_table) %>%  # List full sequences
+  nchar() %>%  # Count characters of aforementioned sequences
+  table() # Summarise said character count
+```
+## Remove chimeras
+```{r}
+seq_table_nochim <- removeBimeraDenovo(seq_table, 
+                                       method="consensus", 
+                                       multithread=TRUE, verbose=TRUE)
+# Inspect sequence retention
+sum(seq_table_nochim)/sum(seq_table)
+```
+
+## Assign taxonomy
+```{r assign_taxonomy}
+taxa <- assignTaxonomy(seq_table_nochim, silva_db_path, multithread = TRUE, tryRC = TRUE)
+taxa <- addSpecies(taxa, silva_species_db_path, tryRC = TRUE)
+
+## Let's look into some headers
+taxa_print <- taxa
+rownames(taxa_print) <- NULL
+head(taxa_print)
+```
+
+## Summarize DADA2 pipeline
+```{r summarise_pipeline}
+# Create a custom function to apply to each DADA object
+getN <- function(x) sum(getUniques(x))
+
+track <- bind_cols(
+  rownames(out) %>% as_tibble() %>% separate(value, into = c("sample_id"), sep = "_"),
+  out %>% as_tibble() %>% select(input = reads.in, filtered = reads.out),
+  denoisedR1 = map_dbl(dadaR1, getN),
+  denoisedR2 = map_dbl(dadaR2, getN),
+  merged = map_dbl(mergers, getN),
+  no_chimera = rowSums(seq_table_nochim)
+) 
+```
+
+```{r plot_read_counts}
+track %>% 
+  pivot_longer(cols = -"sample_id") %>% 
+  mutate(name = fct_relevel(name, "input", "filtered", "denoisedR1", "denoisedR2", "merged", "no_chimera")) %>% 
+  ggplot(aes(x = sample_id, y = value, fill = name)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  ylab("count") +
+  scale_fill_manual(values = c("gray", "#EFF3FF", "#BDD7E7", "#6BAED6", "#3182BD", "#08519C")) +
+  theme(axis.text.x = element_text(angle = 90))
+```
+
+## Prepare for data analysis
+```{r create_tree}
+dna <- DNAStringSet(getSequences(seq_table_nochim)) # Create a DNAStringSet from the ASVs
+  
+aligned_dna <- AlignSeqs(myXStringSet = dna)
+
+as.DNAbin(aligned_dna)
+  
+phy_tree <- nj(dist.dna(as.DNAbin(aligned_dna), model="raw"))  # Using Neighbor-Joining for example
+phy_tree$tip.label <- colnames(seq_table_nochim)
+```
+
+Store your OTU table alongside sample and taxonomic information
+```{r prepare_phyloseq_object}
+rownames(seq_table_nochim) <-  
+  otu_table(seq_table_nochim, taxa_are_rows = FALSE) %>% rownames() %>% as_tibble() %>%   
+  separate(value, into = "sample_id", sep = "_", remove = T, extra = "drop") %>% pull(sample_id)
+
+## Prepare phyloseq object
+ps <- phyloseq(otu_table(seq_table_nochim, taxa_are_rows=FALSE), 
+               sample_data(data_table %>% data.frame() %>% column_to_rownames("sample_id")), 
+               tax_table(taxa),
+               phy_tree(phy_tree))
+
+## Display the object
+ps
+```
+```{r save_phyloseq_object, eval = F}
+saveRDS(ps, paste(output_dir, "phyloseq_object.rds", sep = '/'))
+```
+
+## Conclusion
+We have processed 16S amplicon Illumina sequencing data using DADA2 to produce a table of operational taxonomic units (OTUs). The OTU table, alongside the sample and taxonomic information can be used for further downstream analyses.
