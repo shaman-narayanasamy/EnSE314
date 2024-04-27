@@ -18,7 +18,7 @@ execute:
 ## Install R Bioconductor
 if (!require("BiocManager", quietly = TRUE))
     install.packages("BiocManager")
-BiocManager::install(version = "3.16")
+BiocManager::install()
 
 ## Install DADA2, phyloseq and Biostrings via Bioconductor
 BiocManager::install(c("dada2", 
@@ -59,7 +59,7 @@ theme_set(theme_bw())
 ## Setup
 ```{r setup}
 ## CHANGE this to the path in your computer where you saved the data
-root_dir <- "/Users/shaman.narayanasamy/Work/Data/EnSE314-PublicHealthMicrobio/EnSE314_data/"
+root_dir <- "/Users/shaman.narayanasamy/Work/Data/EnSE314-PublicHealthMicrobio/test/EnSE314_data/"
 
 ## Define input directory where you will read all your data from
 input_dir <- paste(root_dir, "input", sep = "/")

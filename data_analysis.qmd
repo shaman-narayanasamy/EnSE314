@@ -8,8 +8,24 @@ execute:
   message: false
 ---
 
+```{r install_packages}
+library(BiocManager, quietly = TRUE) # This has already been installed
+
+## Install various Bioconductor packages
+BiocManager::install(c("phyloseq", 
+                       "DESeq2",
+                       "tidyHeatmap",
+                       ))
+## Install vegan
+install.packages("vegan")
+
+## Install tidyverse and general use packages
+install.packages("tidyverse")
+install.packages("readxl")
+```
+
 ## Load packages
-```{r load_packages}
+```{r load_packages, message=F}
 ## Load packages
 ### Standardized management of processed amplicon sequencing output (e.g. from DADA2) 
 library(phyloseq)
@@ -17,7 +33,7 @@ library(phyloseq)
 ### Ecological analysis
 library(vegan)
 
-### Differential abundance 
+### Differential abundance analysis
 library(DESeq2)
 
 ### Nice heatmaps
@@ -31,7 +47,9 @@ theme_set(theme_bw()) # Set simple theme
 
 ```{r setup}
 ## CHANGE this to the path in your computer where you saved the data
-root_dir <- "/Users/shaman.narayanasamy/Work/Data/EnSE314-PublicHealthMicrobio/EnSE314_data/"
+#root_dir <- "/Users/shaman.narayanasamy/Work/Data/EnSE314-PublicHealthMicrobio/EnSE314_data"
+root_dir <- "/Users/shaman.narayanasamy/Work/Data/EnSE314-PublicHealthMicrobio/test/EnSE314_data/"
+
 
 ## Define input directory where you will read all your data from
 input_dir <- paste(root_dir, "input", sep = "/")
@@ -42,13 +60,35 @@ output_dir <- paste(root_dir, "output", sep = "/")
 ## Define metadata file path
 metadata_path <- paste(input_dir, params$metadata_file, sep = "/")
 
-## Read phyloseq object containing OTU, taxonomy, sample and phylogenetic tree data generated from the previous sessions
+## CHANGE this by removing the "#" symbol (i.e. uncomment) at the beginning according. Select one of the below
+
+## If you were able to run the entire script in the last session, then uncomment this:
+
 #ps <- readRDS(paste(output_dir, "phyloseq_object.rds", sep = "/")) 
 
-## If for some reason you were unable to produce the phyloseq object from the last session, just read the one that has been prepared
+## If you did not manage to run the entire script from the last session, then uncomment this:
+
 ps <- readRDS(paste(input_dir, "phyloseq_object.rds", sep = "/"))
 
 ps
+```
+## Prepare metadata
+```{r prepare_metadata}
+## Obtain sample information
+sample_info <-  
+  read_xlsx(metadata_path, sheet = "Metadata") %>% 
+  mutate(common_name = str_replace(common_name, "&", "_")) %>% 
+  separate(common_name, into = c("tmp1", "tmp2", "day", "tmp3", "type", "reactor"), sep = "_", remove = FALSE, fill = "right")  %>% 
+  select(-c(tmp1, tmp2, tmp3)) %>% 
+  mutate(day = str_remove(day, "day")) %>% 
+  mutate(day = as.numeric(day)) %>% 
+  mutate(condition = case_when(
+   type == "feedWW" ~ "control",
+   TRUE ~ "treatment"
+  )) %>% 
+  select(sample_id = Run, condition, reactor, day)
+
+sample_info
 ```
 ## Evaluating information content
 ```{r plot_cummulative_abundance, fig.height=4, fig.width=4}
@@ -77,21 +117,8 @@ ps_rarefied = rarefy_even_depth(ps,
                                 replace = FALSE) # Do not replace
 ```
 
-```{r prepare_metadata}
-## Obtain sample information
-sample_info <-  
-  read_xlsx(metadata_path, sheet = "Metadata") %>% 
-  mutate(common_name = str_replace(common_name, "&", "_")) %>% 
-  separate(common_name, into = c("tmp1", "tmp2", "day", "tmp3", "type", "reactor"), sep = "_", remove = FALSE, fill = "right")  %>% 
-  select(-c(tmp1, tmp2, tmp3)) %>% 
-  mutate(day = str_remove(day, "day")) %>% 
-  mutate(day = as.numeric(day)) %>% 
-  mutate(condition = case_when(
-   type == "feedWW" ~ "control",
-   TRUE ~ "treatment"
-  )) %>% 
-  select(sample_id = Run, condition, reactor, day)
 
+```{r prepare_count_data}
 # Create a count table
 count_data <-  
   full_join(
@@ -131,12 +158,15 @@ ps_pruned
 ```{r remove_low_occurance_otus}
 # Define a minimum sample presence threshold
 min_samples_threshold <- round(nrow(sample_data(ps_pruned)) * 0.10) # OTU must be present at least in 10% of the samples
+
 # Filter out OTUs that are not present in at least 'min_samples_threshold' samples
 ps_pruned <- filter_taxa(ps_pruned, function(x) sum(x > 0) >= min_samples_threshold, TRUE)
 ps_pruned
 ```
 
 ```{r inspect_saturation, fig.height=4, fig.width=4}
+## Inspect the OTU saturation curve again
+
 otu_abundances <- 
   taxa_sums(ps_pruned) %>% # Sum up OTUs
   sort(decreasing = TRUE) # Sort from highest to lowest
@@ -154,16 +184,13 @@ bind_cols(OTU = 1:length(cumulative_abundance),
 
 ## Data exploration
 ### Relative abundance
-```{r normalize_data}
+```{r plot_relab}
 # Transform counts to relative abundances or use another normalization method
 ps_relab <- transform_sample_counts(ps_pruned, function(x) x / sum(x))
-```
 
-```{r, plot_relab, fig.height = 6, fig.width = 12}
 plot_bar(ps_relab, fill="Phylum", x = "day", facet_grid = ~ condition + reactor) + 
   ggplot2::theme_minimal()
 ```
-
 ### Dimensionality reduction
 ```{r dimensionality_reduction, fig.width = 5, fig.height = 4}
 # PCoA plot using the unweighted UniFrac as distance
@@ -174,40 +201,50 @@ plot_ordination(ps_rarefied, ordination, color="condition") + theme(aspect.ratio
 ## Statistical analysis
 ### Alpha diversity
 ```{r plot_richness_sample, fig.height=4, fig.width=8}
+## Plot community richness
 plot_richness(ps_rarefied, color = "condition", measures = c("Observed", "Chao1"))
 ```
 
-```{r plot_richness_barplot, fig.height=6, fig.width=4}
-my_measures <- c("Observed", "Simpson")
-plot_richness(ps_rarefied, x = "condition", measures = my_measures, nrow = length(my_measures)) + 
+```{r plot_richness_barplot, fig.height=6, fig.width=8}
+my_measures <- c("Observed", "Chao1", "Shannon", "Simpson")
+plot_richness(ps_rarefied, x = "condition", measures = my_measures, nrow = 2) + 
   geom_boxplot(aes(fill = condition), alpha = 0.5) 
 ```
-```{r}
+```{r richness}
+## Calculate richness based on difference measures
 rich <- estimate_richness(ps_rarefied)
-```
 
-Test whether the observed number of OTUs differs significantly between conditions. We make a non-parametric test, the Wilcoxon rank-sum test (Mann-Whitney):
-```{r}
+# Test whether the observed number of OTUs differs significantly between conditions. Perform a non-parametric test, the Wilcoxon rank-sum test (Mann-Whitney):
 pairwise.wilcox.test(rich$Observed, sample_data(ps_rarefied)$condition)
 ```
- 
 ### Beta diversity
-Test whether the conditions differ significantly from each other using the PERMutational ANalysis Of Variance Analysis (PERMANOVA):
-```{r}
+Compare the difference of community structure between environments.
+```{r beta_diversity_condition}
+# Use previously computed unifrac distance as a measure of the beta diversity and the PERMutational ANalysis Of Variance Analysis (PERMANOVA)
+# Test whether the conditions differ significantly from each other:
 adonis2(wunifrac_dist ~ sample_info$condition)
 ```
 
+```{r beta_diversity_reactor}
+# Also check if the different reactors exhibit any significant differences
+adonis2(wunifrac_dist ~ sample_info$reactor)
+```
 ### Diffirential OTU abundance testing
 We use DESeq2, which is typically used to identify differentially expressed genes/transcripts to perform this analysis.
 ```{r deseq2}
+## Define a model for downstream diffrential analysis. In this case, we are interested in the "condition" variable
 sample_data(ps)$condition <- as.factor(sample_data(ps)$condition)
-ds <- phyloseq_to_deseq2(ps, ~ condition)
+
+## Create differential abundance object for analysis object based on the model just created
+ds <- phyloseq_to_deseq2(ps, ~ condition) 
 ds <- DESeq(ds)
 
+## Define the significance levels 
 alpha = 0.01
 
+## Compute the and rank different expression results that compares treatment (i.e. samples with OMP-spikes vs control)
 res_sig <- 
-  results(ds, contrast=c("condition", "treatment", "control"), alpha=alpha) %>% 
+  results(ds, contrast=list(c("condition_treatment_vs_control")), alpha=alpha) %>%  # Here is where we define the comparison
   as.data.frame() %>% 
   rownames_to_column("OTU") %>% 
   as_tibble() %>% 
@@ -218,16 +255,24 @@ res_sig <-
       by = "OTU"
   ) %>% 
   filter(!is.na(Genus)) # Remove any taxa unclassified on the Genus level
-  
+ 
+## Extract the top OTUs
 top_otus <- res_sig$OTU
 
-res_sig <- 
-  select(res_sig, -OTU) # Remove the OTU column to clean up
+## Display the table (for informational purposes)
+select(res_sig, # Remove the OTU column to clean up 
+       c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species"), 
+       everything(), 
+       -OTU)
 ```
 
-```{r}
+### Top OTUs/taxa
+```{r get_top_abundances}
+## From the differential abundance analyses, select the data of the most significant OTUs
 top_otu_abundance <- 
-  otu_table(ps, taxa_are_rows = TRUE) %>% t() %>%  as.data.frame() %>% rownames_to_column("OTU") %>% as_tibble() %>% 
+  otu_table(ps, taxa_are_rows = TRUE) %>% t() %>%  
+  as.data.frame() %>% rownames_to_column("OTU") %>% 
+  as_tibble() %>% 
     filter(OTU %in% top_otus) %>% 
     pivot_longer(cols = -OTU, names_to = "sample_id", values_to = "abundance") %>% 
     left_join( 
@@ -236,9 +281,7 @@ top_otu_abundance <-
     left_join( 
       sample_info,
       by = "sample_id"
-    ) %>% select(-OTU)
-    
-top_otu_abundance %>% 
+    ) %>% select(-OTU) %>% 
   mutate(taxa = paste(Phylum, Genus, sep = ";")) %>% 
   select(-c(Kingdom, Phylum, Class, Order, Family, Genus, Species,)) %>% 
   group_by(taxa, sample_id) %>% 
@@ -255,9 +298,14 @@ top_otu_abundance %>%
          "A2:60", "A2:75", "A2:90", "A2:105","A2:120","B1:15", "B1:30", "B1:60",
          "B1:90", "B1:120","B2:15", "B2:30", "B2:60", "B2:90", "B2:120"))
          ) %>% 
-  distinct() %>%  
-  group_by(condition) %>% 
-    tidyHeatmap::heatmap(.row = taxa, .column = sample_name, .value = abundance, scale = "both", 
+  distinct()
+```
+
+
+```{r plot_heatmap}
+top_otu_abundance %>% 
+group_by(condition) %>% 
+    tidyHeatmap::heatmap(.row = taxa, .column = sample_name, .value = abundance, scale = "column", 
                          cluster_rows = TRUE,  # Cluster rows to see if there are any intersting bacteria
                          cluster_columns = FALSE,  # Turn off clustering for columns
                          palette_value = circlize::colorRamp2(c(-2, -1, 0, 1, 2), viridis::magma(5))
@@ -266,7 +314,7 @@ top_otu_abundance %>%
 ```
 
 
-```{r}
+```{r plot_foldchange}
 ggplot(res_sig, aes(x=Phylum, y=log2FoldChange, color=Genus)) +
     geom_jitter(size=3, width = 0.2) +
     theme(axis.text.x = element_text(angle = -90, hjust = 0, vjust=0.5))
